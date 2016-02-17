@@ -21,6 +21,9 @@ def run_backup(args):
     if args.password:
         env.password = args.password
 
+    if args.sshkey:
+        env.key_filename = args.sshkey
+
     if args.sshport:
         env.port = args.sshport
 
@@ -54,7 +57,8 @@ def run_backup(args):
         backup_schema=args.backup_schema,
         buffer_size=args.buffer_size,
         use_sudo=args.use_sudo,
-        connection_pool_size=args.connection_pool_size
+        connection_pool_size=args.connection_pool_size,
+        exclude_tables=args.exclude_tables
     )
 
     if create_snapshot:
@@ -109,7 +113,9 @@ def restore_backup(args):
 
     worker = RestoreWorker(aws_access_key_id=args.aws_access_key_id,
                            aws_secret_access_key=args.aws_secret_access_key,
-                           snapshot=snapshot)
+                           snapshot=snapshot,
+                           cassandra_bin_dir=args.cassandra_bin_dir,
+                           cassandra_data_dir=args.cassandra_data_dir)
 
     if args.hosts:
         hosts = args.hosts.split(',')
@@ -136,6 +142,11 @@ def main():
         '--buffer-size',
         default=64,
         help="The buffer size (MB) for compress and upload")
+
+    backup_parser.add_argument(
+        '--exclude-tables',
+        default='',
+        help="Column families you want to skip")
 
     backup_parser.add_argument(
         '--hosts',
@@ -186,6 +197,10 @@ def main():
         help="User password to connect with hosts")
 
     backup_parser.add_argument(
+        '--sshkey',
+        help="The file containing the private ssh key to use to connect with hosts")
+
+    backup_parser.add_argument(
         '--new-snapshot',
         action='store_true',
         help="Create a new snapshot")
@@ -230,6 +245,16 @@ def main():
         '--target-hosts',
         required=True,
         help="The comma separated list of hosts to restore into")
+
+    restore_parser.add_argument(
+        '--cassandra-bin-dir',
+        default='/usr/bin',
+        help="cassandra binaries directory")
+
+    restore_parser.add_argument(
+        '--cassandra-data-dir',
+        default='/usr/local/cassandra/data',
+        help="cassandra data directory")
 
     args = base_parser.parse_args()
     subcommand = args.subcommand

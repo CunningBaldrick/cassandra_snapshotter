@@ -95,7 +95,7 @@ class Snapshot(object):
 
 
 class RestoreWorker(object):
-    def __init__(self, aws_access_key_id, aws_secret_access_key, snapshot):
+    def __init__(self, aws_access_key_id, aws_secret_access_key, snapshot, cassandra_bin_dir, cassandra_data_dir):
         self.aws_secret_access_key = aws_secret_access_key
         self.aws_access_key_id = aws_access_key_id
         self.s3connection = S3Connection(
@@ -103,6 +103,8 @@ class RestoreWorker(object):
             aws_secret_access_key=self.aws_secret_access_key)
         self.snapshot = snapshot
         self.keyspace_table_matcher = None
+        self.cassandra_bin_dir = cassandra_bin_dir
+        self.cassandra_data_dir = cassandra_data_dir
 
     def restore(self, keyspace, table, hosts, target_hosts):
         # TODO:
@@ -133,8 +135,8 @@ class RestoreWorker(object):
             tables.add(r.group(3))
             keys.append(k)
 
-        self._delete_old_dir_and_create_new(keyspace, tables)
-
+        keyspace_path = "/".join([self.cassandra_data_dir, "data", keyspace])
+        self._delete_old_dir_and_create_new(keyspace_path, tables)
         total_size = reduce(lambda s, k: s + k.size, keys, 0)
 
         logging.info("Found %(files_count)d files, with total size \
@@ -148,17 +150,17 @@ class RestoreWorker(object):
 
         logging.info("Finished downloading...")
 
-        self._run_sstableloader(keyspace, tables, target_hosts)
+        self._run_sstableloader(keyspace_path, tables, target_hosts, self.cassandra_bin_dir)
 
-    def _delete_old_dir_and_create_new(self, keyspace, tables):
-        keyspace_path = "./{!s}".format(keyspace)
+    def _delete_old_dir_and_create_new(self, keyspace_path, tables):
+
         if os.path.exists(keyspace_path) and os.path.isdir(keyspace_path):
-            logging.warning("Deleteing directory ({!s})...".format(
+            logging.warning("Deleting directory ({!s})...".format(
                 keyspace_path))
             shutil.rmtree(keyspace_path)
 
         for table in tables:
-            path = "./{!s}/{!s}".format(keyspace, table)
+            path = "./{!s}/{!s}".format(keyspace_path, table)
             if not os.path.exists(path):
                 os.makedirs(path)
 
@@ -214,14 +216,16 @@ class RestoreWorker(object):
             size /= 1024.0
         return "{:3.1f}{!s}".format(size, 'TB')
 
-    def _run_sstableloader(self, keyspace, tables, target_hosts):
-        # TODO: get path to sstableloader
+    def _run_sstableloader(self, keyspace_path, tables, target_hosts, cassandra_bin_dir):
+        sstableloader = "{!s}/sstableloader".format(cassandra_bin_dir)
         for table in tables:
-            command = 'sstableloader --nodes %(hosts)s -v \
-                %(keyspace)s/%(table)s' % dict(hosts=','.join(target_hosts),
-                                               keyspace=keyspace, table=table)
+            path = "/".join([keyspace_path, table])
+            if not os.path.exists(path):
+                os.makedirs(path)
+            command = '%(sstableloader)s --nodes %(hosts)s -v \
+                %(keyspace_path)s/%(table)s' % dict(sstableloader=sstableloader, hosts=','.join(target_hosts),
+                                                    keyspace_path=keyspace_path, table=table)
             logging.info("invoking: {!s}".format(command))
-
             os.system(command)
 
 
@@ -248,7 +252,7 @@ class BackupWorker(object):
                  aws_access_key_id, s3_bucket_region, s3_ssenc,
                  s3_connection_host, cassandra_conf_path, use_sudo,
                  nodetool_path, cassandra_bin_dir, backup_schema,
-                 buffer_size, connection_pool_size=12):
+                 buffer_size, exclude_tables, connection_pool_size=12):
         self.aws_secret_access_key = aws_secret_access_key
         self.aws_access_key_id = aws_access_key_id
         self.s3_bucket_region = s3_bucket_region
@@ -264,6 +268,7 @@ class BackupWorker(object):
             self.use_sudo = bool(strtobool(use_sudo))
         else:
             self.use_sudo = use_sudo
+        self.exclude_tables = exclude_tables
 
     def get_current_node_hostname(self):
         return env.host_string
@@ -279,13 +284,15 @@ class BackupWorker(object):
                            "--snapshot_name=%(snapshot_name)s " \
                            "--snapshot_keyspaces=%(snapshot_keyspaces)s " \
                            "--snapshot_table=%(snapshot_table)s " \
-                           "--conf_path=%(conf_path)s"
+                           "--conf_path=%(conf_path)s " \
+                           "--exclude_tables=%(exclude_tables)s"
         cmd = manifest_command % dict(
             manifest_path=manifest_path,
             snapshot_name=snapshot.name,
             snapshot_keyspaces=','.join(snapshot.keyspaces or ''),
             snapshot_table=snapshot.table,
             conf_path=self.cassandra_conf_path,
+            exclude_tables=self.exclude_tables,
             incremental_backups=incremental_backups and '--incremental_backups' or ''
         )
         if self.use_sudo:
